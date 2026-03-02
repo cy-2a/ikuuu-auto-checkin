@@ -73,17 +73,28 @@ async function checkIn(account) {
   }
 
   const data = await response.json();
-  console.log(`${account.name}: ${data.msg}`);
+  const msg = data.msg;
 
-  return data.msg;
+  console.log(`${account.name}: ${msg}`);
+
+  // ===== 调用你的 API =====
+  const fullMsg = `${account.name}: ${msg}`;
+  const apiUrl = `https://api.chuckfang.com/第五个季节/${encodeURIComponent(fullMsg)}`;
+
+  try {
+    await fetch(apiUrl);
+  } catch (err) {
+    console.error("调用 API 失败:", err.message);
+  }
+  // =========================
+
+  return msg;
 }
 
-// 处理
+// 处理单个账号
 async function processSingleAccount(account) {
   const cookedAccount = await logIn(account);
-
   const checkInResult = await checkIn(cookedAccount);
-
   return checkInResult;
 }
 
@@ -110,7 +121,9 @@ async function main() {
     process.exit(1);
   }
 
-  const allPromises = accounts.map((account) => processSingleAccount(account));
+  const allPromises = accounts.map((account) =>
+    processSingleAccount(account)
+  );
   const results = await Promise.allSettled(allPromises);
 
   const msgHeader = "\n======== 签到结果 ========\n\n";
