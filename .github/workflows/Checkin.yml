@@ -3,7 +3,6 @@ name: IKUUU-Auto-Checkin
 on:
   workflow_dispatch:
   schedule:
-    # Actions 任务延迟过高，提前一些时间。
     # UTC+8 ~ 07:33
     - cron: "33 23 * * *"
 
@@ -14,33 +13,17 @@ jobs:
     env:
       ACCOUNTS: ${{ secrets.ACCOUNTS }}
       HOST: ${{ secrets.HOST }}
-      TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-      TELEGRAM_TO: ${{ secrets.TELEGRAM_TO }}
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Use Node.js latest
+      - name: Use Node.js 20 (LTS)
         uses: actions/setup-node@v4
         with:
-          node-version: latest
+          node-version: 20
 
       - name: Checkin
         id: checkin
         shell: bash
         run: |
           node main.js
-
-      - name: Notify
-        if: ${{ always() && env.TELEGRAM_TOKEN && env.TELEGRAM_TO }}
-        uses: appleboy/telegram-action@master
-        with:
-          to: ${{ secrets.TELEGRAM_TO }}
-          token: ${{ secrets.TELEGRAM_TOKEN }}
-          format: markdown
-          message: |
-            *iKuuu 自动签到*
-
-            ${{ steps.checkin.outputs.result  }}
-
-            [任务详情](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
