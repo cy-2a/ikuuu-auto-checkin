@@ -3,8 +3,8 @@ name: IKUUU-Auto-Checkin
 on:
   workflow_dispatch:
   schedule:
-    # UTC 15:33 -> 北京时间 23:33 (Actions 任务延迟过高，提前一些时间)
-    - cron: "33 15 * * *"
+    # UTC+8 ~ 07:33
+    - cron: "33 23 * * *"
 
 jobs:
   checkin:
@@ -17,13 +17,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup Node.js
+      - name: Use Node.js 20 (LTS)
         uses: actions/setup-node@v4
         with:
-          # 锁定稳定版本避免 latest 带来的意外 break
           node-version: 20
 
-      - name: Run Checkin Script
+      - name: Checkin
         id: checkin
         shell: bash
         run: |
