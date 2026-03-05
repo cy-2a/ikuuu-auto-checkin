@@ -3,70 +3,28 @@ name: IKUUU-Auto-Checkin
 on:
   workflow_dispatch:
   schedule:
-    # UTC+8 ~ 07:33  => UTC 23:33
-    - cron: "33 23 * * *"
+    # UTC 15:33 -> 北京时间 23:33 (Actions 任务延迟过高，提前一些时间)
+    - cron: "33 15 * * *"
 
 jobs:
   checkin:
     name: Checkin
     runs-on: ubuntu-latest
-    timeout-minutes: 10
-
     env:
       ACCOUNTS: ${{ secrets.ACCOUNTS }}
       HOST: ${{ secrets.HOST }}
 
-      # 强制 IPv4 优先，缓解 GitHub Runner IPv6 不稳定导致的偶发 connect timeout
-      NODE_OPTIONS: --dns-result-order=ipv4first
-
-      # 可选：并发、超时、重试（你也可以不配，代码里有默认值）
-      CONCURRENCY: 2
-      CONNECT_TIMEOUT_MS: 12000
-      HEADERS_TIMEOUT_MS: 15000
-      FETCH_RETRIES: 4
-
-      TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-      TELEGRAM_TO: ${{ secrets.TELEGRAM_TO }}
-
     steps:
       - uses: actions/checkout@v4
 
-      - name: Use Node.js 20 (LTS)
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
+          # 锁定稳定版本避免 latest 带来的意外 break
           node-version: 20
 
-      # 可选：探活（不阻断主流程，但能帮助你判断“是对端挂了还是你代码挂了”）
-      - name: Preflight (DNS + TLS)
-        shell: bash
-        continue-on-error: true
-        run: |
-          echo "HOST=$HOST"
-          node -p "process.versions.node"
-          node -e "require('dns').lookup(process.env.HOST||'ikuuu.nl', {all:true}, console.log)"
-          curl -I --max-time 8 "https://${HOST:-ikuuu.nl}/" || true
-
-      - name: Checkin
+      - name: Run Checkin Script
         id: checkin
         shell: bash
         run: |
           node main.js
-
-      - name: Notify
-        if: ${{ always() && env.TELEGRAM_TOKEN && env.TELEGRAM_TO }}
-        uses: appleboy/telegram-action@master
-        with:
-          to: ${{ secrets.TELEGRAM_TO }}
-          token: ${{ secrets.TELEGRAM_TOKEN }}
-          format: markdown
-          message: |
-            *iKuuu 自动签到*
-
-            `${{ github.workflow }} / ${{ github.job }}`
-            `${{ github.repository }} @ ${{ github.ref_name }}`
-
-            ```
-            ${{ steps.checkin.outputs.result }}
-            ```
-
-            [任务详情](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
