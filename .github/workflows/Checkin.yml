@@ -3,57 +3,49 @@ name: IKUUU-Auto-Checkin
 on:
   workflow_dispatch:
   schedule:
-    # UTC+8 ~ 07:33  => UTC 23:33
+    # UTC+8 ~ 07:33
     - cron: "33 23 * * *"
 
 jobs:
   checkin:
     name: Checkin
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 8
 
     env:
       ACCOUNTS: ${{ secrets.ACCOUNTS }}
       HOST: ${{ secrets.HOST }}
-
-      # 强制 IPv4 优先，缓解 GitHub Runner IPv6 不稳定导致的偶发 connect timeout
-      NODE_OPTIONS: --dns-result-order=ipv4first
-
-      # 可选：并发、超时、重试（你也可以不配，代码里有默认值）
-      CONCURRENCY: 2
-      CONNECT_TIMEOUT_MS: 12000
-      HEADERS_TIMEOUT_MS: 15000
-      FETCH_RETRIES: 4
-
-      TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-      TELEGRAM_TO: ${{ secrets.TELEGRAM_TO }}
+      CONCURRENCY: 2  # 降低并发数，减少网络压力
+      FETCH_TIMEOUT_MS: 15000
+      FETCH_RETRIES: 3
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
 
-      - name: Use Node.js 20 (LTS)
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: '20'
+          cache: 'npm'
 
-      # 可选：探活（不阻断主流程，但能帮助你判断“是对端挂了还是你代码挂了”）
-      - name: Preflight (DNS + TLS)
-        shell: bash
-        continue-on-error: true
+      - name: Validate configuration
         run: |
-          echo "HOST=$HOST"
-          node -p "process.versions.node"
-          node -e "require('dns').lookup(process.env.HOST||'ikuuu.nl', {all:true}, console.log)"
-          curl -I --max-time 8 "https://${HOST:-ikuuu.nl}/" || true
+          if [ -z "${{ env.ACCOUNTS }}" ]; then
+            echo "❌ 未配置 ACCOUNTS 密钥"
+            exit 1
+          fi
+          echo "✅ 配置验证通过"
 
-      - name: Checkin
+      - name: Run Checkin Script
         id: checkin
         shell: bash
-        run: |
-          node main.js
+        run: node main.js
 
-      - name: Notify
-        if: ${{ always() && env.TELEGRAM_TOKEN && env.TELEGRAM_TO }}
+      - name: Send Telegram Notification
+        if: ${{ always() && secrets.TELEGRAM_TOKEN && secrets.TELEGRAM_TO }}
         uses: appleboy/telegram-action@master
         with:
           to: ${{ secrets.TELEGRAM_TO }}
@@ -62,11 +54,8 @@ jobs:
           message: |
             *iKuuu 自动签到*
 
-            `${{ github.workflow }} / ${{ github.job }}`
-            `${{ github.repository }} @ ${{ github.ref_name }}`
-
-            ```
-            ${{ steps.checkin.outputs.result }}
-            ```
+            ${{ steps.checkin.outputs.result || '执行失败' }}
 
             [任务详情](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
+
+            状态: ${{ steps.checkin.outputs.success == 'true' && '✅ 成功' || '❌ 失败' }}
