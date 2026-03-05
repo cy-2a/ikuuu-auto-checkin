@@ -1,3 +1,4 @@
+import { fetch, FormData } from "undici";
 import { appendFileSync } from "fs";
 
 const host = process.env.HOST || "ikuuu.nl";
@@ -7,6 +8,7 @@ const checkInUrl = `https://${host}/user/checkin`;
 
 const API_BASE = "https://api.chuckfang.com/第五个季节/";
 
+// 格式化 Cookie
 function formatCookie(rawCookieArray) {
   const cookiePairs = new Map();
 
@@ -19,7 +21,7 @@ function formatCookie(rawCookieArray) {
   }
 
   return Array.from(cookiePairs)
-    .map(([k, v]) => `${k}=${v}`)
+    .map(([key, value]) => `${key}=${value}`)
     .join("; ");
 }
 
@@ -53,9 +55,9 @@ async function logIn(account) {
 
     console.log(`${account.name}: ${data.msg}`);
 
-    const rawCookieArray = response.headers.getSetCookie();
+    const rawCookieArray = response.headers.getSetCookie?.() || [];
 
-    if (!rawCookieArray || rawCookieArray.length === 0) {
+    if (!rawCookieArray.length) {
       throw new Error("Cookie 获取失败");
     }
 
@@ -118,11 +120,11 @@ async function pushResult(message) {
 // 单账号流程
 async function processSingleAccount(account) {
   try {
-    const cooked = await logIn(account);
+    const cookedAccount = await logIn(account);
 
-    const result = await checkIn(cooked);
+    const result = await checkIn(cookedAccount);
 
-    await pushResult(result);
+    await pushResult(`${account.name}: ${result}`);
 
     return result;
   } catch (err) {
@@ -136,11 +138,12 @@ async function processSingleAccount(account) {
   }
 }
 
+// GitHub 输出
 function setGitHubOutput(name, value) {
   appendFileSync(process.env.GITHUB_OUTPUT, `${name}<<EOF\n${value}\nEOF\n`);
 }
 
-// 主函数
+// 主程序
 async function main() {
   let accounts;
 
@@ -167,7 +170,7 @@ async function main() {
   console.log(`开始签到，共 ${accounts.length} 个账号\n`);
 
   const results = await Promise.allSettled(
-    accounts.map((acc) => processSingleAccount(acc))
+    accounts.map((account) => processSingleAccount(account))
   );
 
   console.log("\n======== 签到结果 ========\n");
