@@ -11,25 +11,25 @@ jobs:
     name: 自动签到
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    
+
     env:
       ACCOUNTS: ${{ secrets.ACCOUNTS }}
       HOST: ${{ secrets.HOST }}
-    
+
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
-      
+
       - name: 设置 Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 'lts/*'
-      
+          node-version: "lts/*"
+
       - name: 执行签到
         id: checkin
         run: node main.js
         continue-on-error: true
-      
+
       - name: 上传日志
         if: always()
         uses: actions/upload-artifact@v4
