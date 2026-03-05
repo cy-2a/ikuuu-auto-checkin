@@ -3,11 +3,11 @@ name: IKUUU-Auto-Checkin
 on:
   workflow_dispatch:
   schedule:
+    # 北京时间 07:33
     - cron: "33 23 * * *"
 
 jobs:
   checkin:
-    name: Checkin
     runs-on: ubuntu-latest
 
     env:
@@ -21,8 +21,10 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: latest
+          node-version: 18
+
+      - name: Install dependencies
+        run: npm install undici
 
       - name: Run Checkin
-        id: checkin
         run: node main.js
