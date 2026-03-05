@@ -3,6 +3,7 @@ name: IKUUU-Auto-Checkin
 on:
   workflow_dispatch:
   schedule:
+    # UTC+8 ~ 07:33
     - cron: "33 23 * * *"
 
 jobs:
@@ -12,7 +13,6 @@ jobs:
     env:
       ACCOUNTS: ${{ secrets.ACCOUNTS }}
       HOST: ${{ secrets.HOST }}
-      NODE_OPTIONS: --dns-result-order=ipv4first
 
     steps:
       - uses: actions/checkout@v4
@@ -24,4 +24,6 @@ jobs:
 
       - name: Checkin
         id: checkin
-        run: node main.js
+        shell: bash
+        run: |
+          node main.js
