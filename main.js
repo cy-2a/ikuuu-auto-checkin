@@ -1,50 +1,16 @@
-// main.js
 import { appendFileSync } from "fs";
-import dns from "dns";
-import { setGlobalDispatcher, Agent } from "undici";
 
-// ---------------------- 配置 ----------------------
 const host = process.env.HOST || "ikuuu.nl";
 const logInUrl = `https://${host}/auth/login`;
 const checkInUrl = `https://${host}/user/checkin`;
 
+// 配置（从环境变量读取，提供默认值）
 const CONCURRENCY = Number(process.env.CONCURRENCY || 3);
-
-// 连接超时：TCP/握手阶段（你遇到的就是这里）
-const CONNECT_TIMEOUT_MS = Number(process.env.CONNECT_TIMEOUT_MS || 12000);
-// headers 超时：已连上但迟迟不给响应头
-const HEADERS_TIMEOUT_MS = Number(process.env.HEADERS_TIMEOUT_MS || 15000);
-
-const FETCH_RETRIES = Number(process.env.FETCH_RETRIES || 4);
-const BASE_BACKOFF_MS = Number(process.env.BASE_BACKOFF_MS || 800);
-
-// 让请求更“分散”，减少固定时刻的同时连接
-const ACCOUNT_JITTER_MS = Number(process.env.ACCOUNT_JITTER_MS || 1200);
-
-// ---------------------- undici 全局 Agent（性能 + 稳定） ----------------------
-// DNS lookup：优先 IPv4（配合 NODE_OPTIONS=--dns-result-order=ipv4first）
-function lookupPreferV4(hostname, options, cb) {
-  // 先试 IPv4，再试系统默认
-  dns.lookup(hostname, { ...options, family: 4 }, (err, address, family) => {
-    if (!err) return cb(null, address, family);
-    dns.lookup(hostname, options, cb);
-  });
-}
-
-setGlobalDispatcher(
-  new Agent({
-    connect: {
-      timeout: CONNECT_TIMEOUT_MS,
-      lookup: lookupPreferV4,
-    },
-    headersTimeout: HEADERS_TIMEOUT_MS,
-    bodyTimeout: 0, // 不限制 body 超时（签到接口一般 body 很小）
-    keepAliveTimeout: 30_000,
-    keepAliveMaxTimeout: 60_000,
-  })
-);
+const FETCH_TIMEOUT_MS = Number(process.env.FETCH_TIMEOUT_MS || 15000);
+const FETCH_RETRIES = Number(process.env.FETCH_RETRIES || 3);
 
 // ---------------------- 工具函数 ----------------------
+
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
@@ -54,114 +20,72 @@ function jitter(ms) {
   return Math.floor(ms * factor);
 }
 
-function isRetryableError(kind) {
-  // 这些属于“网络瞬态问题”，重试有意义
-  return new Set([
-    "CONNECT_TIMEOUT",
-    "HEADERS_TIMEOUT",
-    "DNS",
-    "SOCKET",
-    "FETCH_FAILED",
-    "TLS",
-  ]).has(kind);
-}
-
+// 简化版错误分类
 function classifyFetchError(err) {
-  const name = err?.name || "";
   const msg = (err?.message || "").toLowerCase();
-  const causeMsg = (err?.cause?.message || "").toLowerCase();
-
-  const combined = `${name} ${msg} ${causeMsg}`;
-
-  // undici 常见：
-  // - Connect Timeout Error
-  // - Headers Timeout Error
-  if (combined.includes("connect timeout")) return "CONNECT_TIMEOUT";
-  if (combined.includes("headers timeout")) return "HEADERS_TIMEOUT";
-
-  if (combined.includes("getaddrinfo") || combined.includes("enotfound"))
-    return "DNS";
-  if (combined.includes("certificate") || combined.includes("tls"))
-    return "TLS";
-  if (combined.includes("econnreset") || combined.includes("socket"))
-    return "SOCKET";
-  if (combined.includes("fetch failed")) return "FETCH_FAILED";
-
+  if (msg.includes("timeout")) return "TIMEOUT";
+  if (msg.includes("getaddrinfo") || msg.includes("enotfound")) return "DNS";
+  if (msg.includes("certificate") || msg.includes("tls")) return "TLS";
+  if (msg.includes("econnreset") || msg.includes("socket")) return "CONNECTION";
+  if (msg.includes("fetch failed")) return "NETWORK";
   return "UNKNOWN";
 }
 
-async function fetchWithRetry(url, options = {}, cfg = {}) {
-  const retries = cfg.retries ?? FETCH_RETRIES;
+// 优化的重试逻辑（更简单但有效）
+async function fetchWithRetry(url, options = {}, attempt = 1) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
 
-  let lastErr;
-
-  for (let attempt = 1; attempt <= retries; attempt++) {
-    try {
-      const res = await fetch(url, options);
-      return res;
-    } catch (err) {
-      lastErr = err;
-      const kind = classifyFetchError(err);
-
-      const cause = err?.cause?.message ? ` | cause: ${err.cause.message}` : "";
-      console.error(`❌ fetch error [${kind}] (${attempt}/${retries}) ${url}${cause}`);
-
-      if (attempt < retries && isRetryableError(kind)) {
-        const backoff = jitter(BASE_BACKOFF_MS * Math.pow(2, attempt - 1));
-        await sleep(backoff);
-        continue;
-      }
-      break;
-    }
-  }
-
-  throw lastErr;
-}
-
-async function readJsonSafely(res) {
-  const text = await res.text();
-  if (!text) return {};
   try {
-    return JSON.parse(text);
-  } catch {
-    const snippet = text.length > 200 ? text.slice(0, 200) + "..." : text;
-    throw new Error(`响应不是有效 JSON（可能被 WAF/返回 HTML/空响应）：${snippet}`);
+    const res = await fetch(url, {
+      ...options,
+      signal: controller.signal,
+      // 使用更基础的请求头
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36',
+        'Accept': 'application/json',
+        ...options.headers
+      }
+    });
+
+    clearTimeout(timeout);
+
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}`);
+    }
+
+    return res;
+  } catch (err) {
+    clearTimeout(timeout);
+
+    const errorType = classifyFetchError(err);
+    console.log(`⚠️ 请求失败 [${errorType}] (尝试 ${attempt}/${FETCH_RETRIES}): ${err.message}`);
+
+    if (attempt < FETCH_RETRIES) {
+      const backoff = jitter(800 * Math.pow(2, attempt - 1));
+      console.log(`🔄 重试等待 ${backoff}ms`);
+      await sleep(backoff);
+      return fetchWithRetry(url, options, attempt + 1);
+    }
+
+    throw err;
   }
 }
 
-// 格式化 Cookie（Set-Cookie -> Cookie header）
+// 格式化 Cookie
 function formatCookie(rawCookieArray) {
   const cookiePairs = new Map();
   for (const cookieString of rawCookieArray) {
     const match = cookieString.match(/^\s*([^=]+)=([^;]*)/);
-    if (match) cookiePairs.set(match[1].trim(), match[2].trim());
-  }
-  return Array.from(cookiePairs)
-    .map(([k, v]) => `${k}=${v}`)
-    .join("; ");
-}
-
-// 并发限流
-async function mapLimit(items, limit, mapper) {
-  const results = new Array(items.length);
-  let idx = 0;
-
-  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
-    while (true) {
-      const current = idx++;
-      if (current >= items.length) break;
-      results[current] = await mapper(items[current], current);
+    if (match) {
+      cookiePairs.set(match[1].trim(), match[2].trim());
     }
-  });
-
-  await Promise.all(workers);
-  return results;
+  }
+  return Array.from(cookiePairs).map(([key, value]) => `${key}=${value}`).join("; ");
 }
 
-// GitHub Output（防止输出注入）
 function setGitHubOutput(name, value) {
-  const safe = String(value ?? "").replace(/\r/g, "");
-  appendFileSync(process.env.GITHUB_OUTPUT, `${name}<<EOF\n${safe}\nEOF\n`);
+  appendFileSync(process.env.GITHUB_OUTPUT, `${name}<<EOF\n${value}\nEOF\n`);
 }
 
 // ---------------------- 核心逻辑 ----------------------
@@ -180,28 +104,23 @@ async function logIn(account) {
   const response = await fetchWithRetry(logInUrl, {
     method: "POST",
     body: formData,
+    headers: {
+      'Referer': logInUrl,
+      'Origin': `https://${host}`,
+    }
   });
 
-  if (!response.ok) {
-    // 429/5xx 可以提示更明确
-    throw new Error(`登录接口 HTTP 错误 - ${response.status}`);
-  }
+  const responseJson = await response.json().catch(() => ({ ret: 0, msg: "响应不是JSON" }));
 
-  const responseJson = await readJsonSafely(response);
-
-  if (responseJson?.ret !== 1) {
-    throw new Error(`登录失败: ${responseJson?.msg ?? "未知错误"}`);
+  if (responseJson.ret !== 1) {
+    throw new Error(`登录失败: ${responseJson.msg || "未知错误"}`);
   }
 
   console.log(`${account.name}: ${responseJson.msg}`);
 
-  // Node 20+ undici: headers.getSetCookie() 可用；否则退化
-  const rawCookieArray =
-    (typeof response.headers.getSetCookie === "function" && response.headers.getSetCookie()) ||
-    [];
-
+  const rawCookieArray = response.headers.getSetCookie?.() || [];
   if (!rawCookieArray || rawCookieArray.length === 0) {
-    throw new Error("获取 Cookie 失败（响应头无 Set-Cookie）");
+    throw new Error("获取 Cookie 失败");
   }
 
   return { ...account, cookie: formatCookie(rawCookieArray) };
@@ -211,85 +130,160 @@ async function logIn(account) {
 async function checkIn(account) {
   const response = await fetchWithRetry(checkInUrl, {
     method: "POST",
-    headers: { Cookie: account.cookie },
+    headers: {
+      Cookie: account.cookie,
+      'Referer': `https://${host}/user`,
+      'Origin': `https://${host}`,
+    },
   });
 
-  if (!response.ok) {
-    throw new Error(`签到接口 HTTP 错误 - ${response.status}`);
-  }
+  const data = await response.json().catch(() => ({ msg: "响应不是JSON" }));
+  console.log(`${account.name}: ${data.msg}`);
 
-  const data = await readJsonSafely(response);
-  const msg = data?.msg ?? "（无返回消息）";
-  console.log(`${account.name}: ${msg}`);
-  return msg;
+  return data.msg;
 }
 
+// 处理单个账号
 async function processSingleAccount(account) {
-  // 给每个账号一点随机延迟，降低同一时刻并发打点
-  await sleep(jitter(ACCOUNT_JITTER_MS));
-
-  const cooked = await logIn(account);
-  const msg = await checkIn(cooked);
-  return msg;
+  try {
+    const cookedAccount = await logIn(account);
+    const result = await checkIn(cookedAccount);
+    return { status: "fulfilled", value: result };
+  } catch (error) {
+    return { status: "rejected", reason: error };
+  }
 }
 
 // ---------------------- 入口 ----------------------
+
 async function main() {
+  console.log("🚀 IKUUU-Auto-Checkin 启动");
+  console.log(`📡 目标主机: ${host}`);
+  console.log(`👥 并发数: ${CONCURRENCY}`);
+  console.log(`⏱️ 超时: ${FETCH_TIMEOUT_MS}ms, 重试: ${FETCH_RETRIES}次\n`);
+
   let accounts;
 
   try {
-    if (!process.env.ACCOUNTS) throw new Error("未配置账户信息（ACCOUNTS）。");
+    if (!process.env.ACCOUNTS) {
+      throw new Error("❌ 未配置账户信息（ACCOUNTS）。");
+    }
+
     accounts = JSON.parse(process.env.ACCOUNTS);
     if (!Array.isArray(accounts) || accounts.length === 0) {
-      throw new Error("账户信息为空或不是数组。");
+      throw new Error("❌ 账户信息为空或不是数组。");
     }
+
+    // 账户信息验证
+    accounts.forEach((account, index) => {
+      if (!account.email || !account.passwd) {
+        throw new Error(`❌ 账户 #${index + 1} 缺少 email 或 passwd 字段`);
+      }
+      if (!account.name) {
+        account.name = `Account#${index + 1}`;
+      }
+    });
+
   } catch (error) {
-    const message = `❌ ${
-      String(error.message).includes("JSON")
-        ? "账户信息配置格式错误（不是合法 JSON）。"
-        : error.message
-    }`;
+    const message = `❌ ${String(error.message).includes("JSON") ? "账户信息配置格式错误（不是合法 JSON）。" : error.message}`;
     console.error(message);
     setGitHubOutput("result", message);
+    setGitHubOutput("success", "false");
     process.exit(1);
   }
 
-  console.log(`共 ${accounts.length} 个账号，并发数：${CONCURRENCY}`);
-  console.log(`HOST=${host}`);
-  console.log(`CONNECT_TIMEOUT_MS=${CONNECT_TIMEOUT_MS}, HEADERS_TIMEOUT_MS=${HEADERS_TIMEOUT_MS}, FETCH_RETRIES=${FETCH_RETRIES}\n`);
+  console.log(`📋 账户列表: ${accounts.map(a => a.name).join(", ")}\n`);
+  console.log("🔄 开始执行签到流程...\n");
 
-  const results = await mapLimit(accounts, CONCURRENCY, async (account) => {
-    try {
-      const msg = await processSingleAccount(account);
-      return { status: "fulfilled", value: msg };
-    } catch (err) {
-      const kind = classifyFetchError(err);
-      const cause = err?.cause?.message ? ` | cause: ${err.cause.message}` : "";
-      return {
-        status: "rejected",
-        reason: new Error(`[${kind}] ${err.message}${cause}`),
-      };
+  const startTime = Date.now();
+
+  // 使用初代代码的简单并行方式，但添加并发限制
+  const results = [];
+  const chunks = [];
+
+  // 将账户分组，实现软并发限制
+  for (let i = 0; i < accounts.length; i += CONCURRENCY) {
+    chunks.push(accounts.slice(i, i + CONCURRENCY));
+  }
+
+  for (const chunk of chunks) {
+    const chunkResults = await Promise.allSettled(
+      chunk.map(account => processSingleAccount(account))
+    );
+    results.push(...chunkResults);
+
+    // 如果还有待处理的账户，增加延迟，避免对服务器造成压力
+    if (chunks.length > 1 && chunk !== chunks[chunks.length - 1]) {
+      console.log("⏸️  间隔等待 2秒...");
+      await sleep(2000);
     }
-  });
+  }
 
-  console.log("\n======== 签到结果 ========\n");
+  const duration = Date.now() - startTime;
+  console.log(`\n⏱️ 总执行时间: ${duration}ms`);
 
-  let hasError = false;
-  const resultLines = results.map((r, i) => {
-    const accountName = accounts[i]?.name ?? `Account#${i + 1}`;
-    const ok = r.status === "fulfilled";
-    if (!ok) hasError = true;
+  // 结果汇总
+  const msgHeader = "\n======== 签到结果 ========\n\n";
+  console.log(msgHeader);
 
-    const icon = ok ? "✅" : "❌";
-    const message = ok ? r.value : (r.reason?.message || String(r.reason));
+  let successCount = 0;
+  let failedCount = 0;
+  const resultLines = results.map((result, index) => {
+    const accountName = accounts[index]?.name ?? `Account#${index + 1}`;
+    const isSuccess = result.status === "fulfilled";
+
+    if (isSuccess) successCount++;
+    else failedCount++;
+
+    const icon = isSuccess ? "✅" : "❌";
+    const message = isSuccess ? result.value : result.reason.message;
     const line = `${accountName}: ${icon} ${message}`;
 
-    ok ? console.log(line) : console.error(line);
+    isSuccess ? console.log(line) : console.error(line);
     return line;
   });
 
-  setGitHubOutput("result", resultLines.join("\n"));
-  if (hasError) process.exit(1);
+  const resultMsg = resultLines.join("\n");
+  setGitHubOutput("result", resultMsg);
+  setGitHubOutput("success", failedCount === 0 ? "true" : "false");
+  setGitHubOutput("success_count", successCount.toString());
+  setGitHubOutput("failed_count", failedCount.toString());
+
+  console.log("\n" + "=".repeat(50));
+  console.log(`✅ 成功: ${successCount}/${accounts.length}`);
+  console.log(`❌ 失败: ${failedCount}/${accounts.length}`);
+  console.log("=".repeat(50));
+
+  if (failedCount > 0) {
+    console.log("\n💡 建议:");
+    console.log("1. 检查网络连接");
+    console.log("2. 尝试调整 CONCURRENCY 环境变量（建议 1-3）");
+    console.log("3. 检查目标网站是否正常");
+    console.log("4. 如果问题持续，考虑使用代理");
+  }
+
+  if (failedCount > 0) {
+    console.error(`\n❌ 执行完成，${failedCount} 个账号失败`);
+    process.exit(1);
+  } else {
+    console.log(`\n✅ 执行成功，所有 ${successCount} 个账号签到完成`);
+    process.exit(0);
+  }
 }
+
+// 错误处理
+process.on('uncaughtException', (err) => {
+  console.error('🚨 未捕获的异常:', err);
+  setGitHubOutput("result", `❌ 程序崩溃: ${err.message}`);
+  setGitHubOutput("success", "false");
+  process.exit(1);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('🚨 未处理的 Promise 拒绝:', reason);
+  setGitHubOutput("result", `❌ 异步操作失败: ${reason}`);
+  setGitHubOutput("success", "false");
+  process.exit(1);
+});
 
 main();
