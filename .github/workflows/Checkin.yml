@@ -3,28 +3,39 @@ name: IKUUU-Auto-Checkin
 on:
   workflow_dispatch:
   schedule:
-    # 北京时间 07:33
+    # UTC+8 07:33 = UTC 23:33
     - cron: "33 23 * * *"
 
 jobs:
   checkin:
+    name: 自动签到
     runs-on: ubuntu-latest
-
+    timeout-minutes: 10
+    
     env:
       ACCOUNTS: ${{ secrets.ACCOUNTS }}
       HOST: ${{ secrets.HOST }}
-
+    
     steps:
-      - name: Checkout
+      - name: 检出代码
         uses: actions/checkout@v4
-
-      - name: Setup Node
+      
+      - name: 设置 Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 18
-
-      - name: Install dependencies
-        run: npm install undici
-
-      - name: Run Checkin
+          node-version: 'lts/*'
+      
+      - name: 执行签到
+        id: checkin
         run: node main.js
+        continue-on-error: true
+      
+      - name: 上传日志
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: checkin-logs-${{ github.run_number }}
+          path: |
+            ${{ github.workspace }}/*.log
+          retention-days: 7
+          if-no-files-found: ignore
