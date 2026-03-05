@@ -3,37 +3,26 @@ name: IKUUU-Auto-Checkin
 on:
   workflow_dispatch:
   schedule:
-    # Actions 任务延迟过高，提前一些时间。
-    # UTC+8 ~ 07:33
     - cron: "33 23 * * *"
 
 jobs:
   checkin:
     name: Checkin
     runs-on: ubuntu-latest
+
     env:
       ACCOUNTS: ${{ secrets.ACCOUNTS }}
       HOST: ${{ secrets.HOST }}
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Use Node.js latest
+      - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: latest
 
-      - name: Checkin
+      - name: Run Checkin
         id: checkin
-        shell: bash
-        run: |
-          node main.js
-
-      - name: Notify (api.chuckfang.com)
-        if: ${{ always() }}
-        shell: bash
-        run: |
-          # 将签到结果拼到链接后面发送给你（对内容做 URL 编码，避免空格/换行/中文导致请求失败）
-          MSG="${{ steps.checkin.outputs.result }}"
-          ENCODED_MSG=$(node -p "encodeURIComponent(process.argv[1])" "$MSG")
-          curl -sS "https://api.chuckfang.com/第五个季节/${ENCODED_MSG}" || true
+        run: node main.js
